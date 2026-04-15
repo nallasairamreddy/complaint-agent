@@ -1,0 +1,16 @@
+# Python virtual environment
+.venv/
+__pycache__/
+
+# Environment variables (Secrets/API Keys)
+.env
+
+# Local Database
+*.db
+complaints.db
+
+# VS Code settings
+.vscode/
+
+# Frontend dependencies
+node_modules/
