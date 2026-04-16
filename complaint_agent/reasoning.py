@@ -1,22 +1,25 @@
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_xai import ChatXAI
 from sqlalchemy.orm import Session
 from database import KeywordWeight, UrgencyThreshold
-from dotenv import load_dotenv
-import os
+from config import XAI_API_KEY, GOOGLE_API_KEY, LLM_PROVIDER
 import json
+import time
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
+# Cache LLM instance at module level — only created once
+_llm_instance = None
 
 def get_llm():
-    return ChatXAI(
-        model="grok-3-mini",
-        api_key=XAI_API_KEY,
-        temperature=0,
-    )
-
+    global _llm_instance
+    if _llm_instance is None:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        _llm_instance = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            google_api_key=GOOGLE_API_KEY,
+            temperature=0,
+        )
+    return _llm_instance
 
 CLASSIFICATION_PROMPT = PromptTemplate(
     input_variables=["complaint_text", "sentiment_score", "risk_keywords"],
@@ -38,24 +41,67 @@ Respond with exactly this JSON structure:
 
 
 def classify_complaint(text: str, sentiment: float, keywords: list, db: Session) -> dict:
-    """Uses LangChain + Grok to classify department and severity."""
+    """Uses LangChain + LLM to classify department and severity. Retries on rate limit."""
     llm = get_llm()
     chain = CLASSIFICATION_PROMPT | llm | StrOutputParser()
-    raw = chain.invoke({
-        "complaint_text": text,
-        "sentiment_score": round(sentiment, 4),
-        "risk_keywords": ", ".join(keywords) if keywords else "none",
-    })
-    try:
-        clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        result = json.loads(clean)
-    except json.JSONDecodeError:
-        result = {
-            "department": "General",
-            "severity_label": "low",
-            "reasoning": "Could not parse LLM response.",
-        }
-    return result
+    
+    last_error = None
+    for attempt in range(2):  
+        try:
+            raw = chain.invoke({
+                "complaint_text": text,
+                "sentiment_score": round(sentiment, 4),
+                "risk_keywords": ", ".join(keywords) if keywords else "none",
+            })
+            clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            return json.loads(clean)
+
+        except json.JSONDecodeError:
+            # LLM responded but JSON was malformed — no point retrying
+            break
+
+        except Exception as e:
+            last_error = str(e)
+            if "429" in last_error or "quota" in last_error.lower() or "rate" in last_error.lower():
+                wait = 10 * (attempt + 1)  # 10s, 20s, 30s
+               # print(f"[WARN] Rate limit hit, waiting {wait}s before retry {attempt + 1}/3...")
+                time.sleep(wait)
+            else:
+                break  # non-rate-limit error, don't retry
+
+    # Fallback: use rule-based classification so the app still works
+    print(f"[WARN] LLM unavailable ({last_error}), falling back to rule-based classification.")
+    return _rule_based_fallback(sentiment, keywords)
+
+
+def _rule_based_fallback(sentiment: float, keywords: list) -> dict:
+    """Simple deterministic fallback when LLM is unavailable."""
+    financial_kw = {"fraud", "scam", "billing", "charge", "refund", "overcharge", "unauthorized"}
+    security_kw  = {"hack", "breach", "unauthorized", "password", "account"}
+    technical_kw = {"error", "outage", "down", "broken", "bug", "crash"}
+
+    kw_set = set(keywords)
+    if kw_set & security_kw:
+        department = "Security"
+    elif kw_set & financial_kw:
+        department = "Billing"
+    elif kw_set & technical_kw:
+        department = "Technical Support"
+    else:
+        department = "General"
+
+    if sentiment < -0.6:
+        severity = "high"
+    elif sentiment < -0.2:
+        severity = "medium"
+    else:
+        severity = "low"
+
+    return {
+        "department": department,
+        "severity_label": severity,
+        "reasoning": "Rule-based fallback used (LLM unavailable).",
+    }
 
 
 def compute_utility_score(sentiment: float, keywords: list, db: Session) -> float:
