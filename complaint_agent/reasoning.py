@@ -46,7 +46,7 @@ def classify_complaint(text: str, sentiment: float, keywords: list, db: Session)
     chain = CLASSIFICATION_PROMPT | llm | StrOutputParser()
     
     last_error = None
-    for attempt in range(2):  
+    for attempt in range(1):  
         try:
             raw = chain.invoke({
                 "complaint_text": text,
