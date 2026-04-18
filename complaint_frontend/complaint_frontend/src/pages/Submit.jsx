@@ -111,13 +111,6 @@ export default function Submit() {
             </div>
           </div>
 
-          {/* Trace Log */}
-          <div>
-            <p className="text-xs font-mono text-slate-500 uppercase tracking-widest mb-2">Agent Trace Log</p>
-            <pre className="bg-ink-800 border border-ink-600 rounded-lg p-4 text-xs font-mono text-slate-400 whitespace-pre-wrap leading-relaxed overflow-auto max-h-48">
-              {result.trace_log}
-            </pre>
-          </div>
         </div>
       )}
     </div>
